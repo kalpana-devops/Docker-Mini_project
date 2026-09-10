@@ -1,64 +1,67 @@
+version: "3.8"
+
 services:
-web:
-build:
-context: ./app
-dockerfile: Dockerfile
-ports:
-- "8080:80" # host:container -> port forwarding
-environment:
-REDIS_HOST: redis
-REDIS_PORT: 6379
-depends_on:
-- redis
+  web:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80" # host:container -> port forwarding
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    depends_on:
+      - redis
+    networks:
+      - counter-net
+
+  redis:
+    image: redis:7-alpine
+    # NOTE: intentionally NO "ports:" here — Redis is only reachable
+    # from other containers on counter-net, never from the host.
+    volumes:
+      - redis-data:/data # NFS-backed named volume -> survives container restarts
+    command: ["redis-server", "--appendonly", "yes"]
+    depends_on:
+      nfs-server:
+        condition: service_healthy
+    networks:
+      - counter-net
+
+  # ------------------------------------------------------------------
+  # NFS server: exports a directory over the network (NFSv4) instead of
+  # just writing to the local Docker host's disk. This is what a real
+  # "shared storage" backend looks like — the same export could be
+  # mounted by containers on a completely different Docker host.
+  # ------------------------------------------------------------------
+  nfs-server:
+    image: itsthenetwork/nfs-server-alpine:latest
+    privileged: true # required to run nfsd inside the container
+    environment:
+      SHARED_DIRECTORY: /data
+    volumes:
+      - nfs-storage:/data # the NFS export's actual backing storage
+    networks:
+      counter-net:
+        ipv4_address: 172.28.0.10 # static IP so the volume driver can reach it reliably
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 2049 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
 networks:
-- counter-net
-redis:
-image: redis:7-alpine
-# NOTE: intentionally NO "ports:" here — Redis is only reachable
-# from other containers on counter-net, never from the host.
+  counter-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
 volumes:
-- redis-data:/data # NFS-backed named volume (see below) -> survives
-container restarts
-command: ["redis-server", "--appendonly", "yes"]
-depends_on:
-nfs-server:
-condition: service_healthy
-networks:
-- counter-net
-# ------------------------------------------------------------------
-# NFS server: exports a directory over the network (NFSv4) instead of
-# just writing to the local Docker host's disk. This is what a real
-# "shared storage" backend looks like — the same export could be
-# mounted by containers on a completely different Docker host.
-# ------------------------------------------------------------------
-nfs-server:
-image: itsthenetwork/nfs-server-alpine:latest
-privileged: true # required to run nfsd inside the container
-environment:
-SHARED_DIRECTORY: /data
-volumes:
-- nfs-storage:/data # the NFS export's actual backing storage
-networks:
-counter-net:
-ipv4_address: 172.28.0.10 # static IP so the volume driver can reach it
-reliably
-healthcheck:
-test: ["CMD-SHELL", "nc -z localhost 2049 || exit 1"]
-interval: 5s
-timeout: 3s
-retries: 12
-volumes:
-nfs-storage: # plain local volume — just the NFS server's own
-disk
-redis-data:
-driver: local
-driver_opts:
-type: nfs
-o: "addr=172.28.0.10,rw,nfsvers=4,nolock,soft"
-device: ":/" # mount the NFS export root
-networks:
-counter-net:
-driver: bridge
-ipam:
-config:
-- subnet: 172.28.0.0/24
+  nfs-storage: # plain local volume — just the NFS server's own disk
+  redis-data:
+    driver: local
+    driver_opts:
+      type: "nfs"
+      o: "addr=172.28.0.10,rw,nfsvers=4,nolock,soft"
+      device: ":"
